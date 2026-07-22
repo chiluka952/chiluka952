@@ -1,230 +1,201 @@
-import io
+import openpyxl
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 import pandas as pd
-import streamlit as st
 
-# Page Configuration
-st.set_page_config(
-    page_title="GSTR-1 Accounting Hub",
-    page_icon="🛒",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
-# Custom Styling for Modern Dark-Mode UI
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background-color: #0f172a;
-        color: #f8fafc;
-    }
-    .main-title {
-        font-size: 26px;
-        font-weight: 800;
-        color: #38bdf8;
-        margin-bottom: 0px;
-    }
-    .sub-title {
-        font-size: 14px;
-        color: #94a3b8;
-        margin-bottom: 20px;
-    }
-    div[data-testid="stMetricValue"] {
-        font-family: 'Segoe UI', monospace;
-        color: #38bdf8;
-    }
-    </style>
-""",
-    unsafe_allow_html=True,
-)
+def process_meesho_gst_files(
+    sales_filepath, returns_filepath, output_filepath
+):
+  print("Processing files and cleaning numeric errors...")
 
-# Header Section
-st.markdown(
-    '<div class="main-title">🛒 E-Commerce GST Statewise Entry Hub</div>',
-    unsafe_allow_html=True,
-)
-st.markdown(
-    '<div class="sub-title">Automated Accounting Engine for Meesho & Flipkart Sales and Returns</div>',
-    unsafe_allow_html=True,
-)
-
-# Platform Selector
-platform = st.radio(
-    "Select Marketplace Platform:",
-    ["Meesho", "Flipkart"],
-    horizontal=True,
-    help="Choose the platform whose reports you are processing.",
-)
-
-st.divider()
-
-# File Uploaders
-col1, col2 = st.columns(2)
-with col1:
-  sales_file = st.file_uploader(
-      "1. Upload Raw TCS Sales Report (.xlsx / .csv)",
-      type=["xlsx", "xls", "csv"],
-  )
-with col2:
-  returns_file = st.file_uploader(
-      "2. Upload Raw TCS Returns Report (.xlsx / .csv)",
-      type=["xlsx", "xls", "csv"],
+  # 1. Read Sales File
+  df_sales = (
+      pd.read_excel(sales_filepath)
+      if sales_filepath.endswith((".xlsx", ".xls"))
+      else pd.read_csv(sales_filepath)
   )
 
-
-# Fast File Reader
-def load_data(file_obj):
-  if file_obj is None:
-    return None
-  if file_obj.name.endswith(".csv"):
-    return pd.read_csv(file_obj, low_memory=False)
-  else:
-    try:
-      return pd.read_excel(file_obj, engine="calamine")
-    except Exception:
-      return pd.read_excel(file_obj, engine="openpyxl")
-
-
-# Dynamic Column Finder
-def find_col(df_cols, possible_names):
-  cols_lower = {str(c).strip().lower(): c for c in df_cols}
-  for name in possible_names:
-    n_lower = name.lower()
-    for col_l, original in cols_lower.items():
-      if n_lower in col_l:
-        return original
-  return None
-
-
-# Processing Logic
-def generate_summary(df_s, df_r, plat):
-  if df_s is None and df_r is None:
-    return None
-
-  ref_df = df_s if df_s is not None else df_r
-
-  if plat == "Meesho":
-    st_names = [
-        "end_customer_state_new",
-        "end_customer_state",
-        "customer_state",
-        "state",
-    ]
-    qty_names = ["quantity", "qty", "pcs"]
-    tax_names = ["total_taxable_sale_value", "taxable_value", "taxable"]
-  else:  # Flipkart
-    st_names = [
-        "Customer Delivery State",
-        "Buyer State",
-        "Delivery State",
-        "State",
-    ]
-    qty_names = ["Quantity", "quantity", "qty"]
-    tax_names = ["Taxable Value", "taxable_value", "Taxable Amount"]
-
-  st_col = find_col(ref_df.columns, st_names)
-  qty_col = find_col(ref_df.columns, qty_names)
-  tax_col = find_col(ref_df.columns, tax_names)
-
-  if not st_col or not qty_col or not tax_col:
-    st.error(
-        f"Could not map required columns. Found headers: {list(ref_df.columns[:8])}"
+  # 2. Read Returns File
+  df_returns = None
+  if returns_filepath:
+    df_returns = (
+        pd.read_excel(returns_filepath)
+        if returns_filepath.endswith((".xlsx", ".xls"))
+        else pd.read_csv(returns_filepath)
     )
-    return None
+
+  # Explicit Column Mappings specified by you:
+  # State -> end_customer_state_new
+  # PCS -> quantity
+  # Taxable Value -> total_taxable_sale_value
+
+  s_st_col = "end_customer_state_new"
+  s_qty_col = "quantity"
+  s_tax_col = "total_taxable_sale_value"
 
   state_map = {}
 
-  # Aggregate Sales
-  if df_s is not None:
-    s_st = find_col(df_s.columns, st_names) or st_col
-    s_qty = find_col(df_s.columns, qty_names) or qty_col
-    s_tax = find_col(df_s.columns, tax_names) or tax_col
+  # Clean & Aggregate Sales Data
+  if s_st_col in df_sales.columns:
+    # Fix "Number Stored as Text" errors by forcing numeric conversion
+    df_sales[s_qty_col] = pd.to_numeric(
+        df_sales[s_qty_col], errors="coerce"
+    ).fillna(0)
+    df_sales[s_tax_col] = pd.to_numeric(
+        df_sales[s_tax_col], errors="coerce"
+    ).fillna(0)
+    df_sales[s_st_col] = (
+        df_sales[s_st_col].astype(str).str.strip().str.upper()
+    )
 
-    temp_s = df_s[[s_st, s_qty, s_tax]].dropna(subset=[s_st]).copy()
-    temp_s[s_st] = temp_s[s_st].astype(str).str.strip().str.upper()
-    temp_s = temp_s[temp_s[s_st] != "NAN"]
-    temp_s[s_qty] = pd.to_numeric(temp_s[s_qty], errors="coerce").fillna(0)
-    temp_s[s_tax] = pd.to_numeric(temp_s[s_tax], errors="coerce").fillna(0)
+    for _, row in df_sales.iterrows():
+      st_name = row[s_st_col]
+      if not st_name or st_name == "NAN":
+        continue
+      if st_name not in state_map:
+        state_map[st_name] = {"pcs": 0.0, "tax": 0.0}
+      state_map[st_name]["pcs"] += row[s_qty_col]
+      state_map[st_name]["tax"] += row[s_tax_col]
 
-    grp_s = temp_s.groupby(s_st).agg({s_qty: "sum", s_tax: "sum"})
-    for state, row in grp_s.iterrows():
-      state_map[state] = {
-          "pcs": row[s_qty],
-          "tax": row[s_tax],
-      }
+  # Clean & Subtract Returns Data
+  if df_returns is not None and s_st_col in df_returns.columns:
+    df_returns[s_qty_col] = pd.to_numeric(
+        df_returns[s_qty_col], errors="coerce"
+    ).fillna(0)
+    df_returns[s_tax_col] = pd.to_numeric(
+        df_returns[s_tax_col], errors="coerce"
+    ).fillna(0)
+    df_returns[s_st_col] = (
+        df_returns[s_st_col].astype(str).str.strip().str.upper()
+    )
 
-  # Subtract Returns
-  if df_r is not None:
-    r_st = find_col(df_r.columns, st_names) or st_col
-    r_qty = find_col(df_r.columns, qty_names) or qty_col
-    r_tax = find_col(df_r.columns, tax_names) or tax_col
+    for _, row in df_returns.iterrows():
+      st_name = row[s_st_col]
+      if not st_name or st_name == "NAN":
+        continue
+      if st_name not in state_map:
+        state_map[st_name] = {"pcs": 0.0, "tax": 0.0}
+      state_map[st_name]["pcs"] -= row[s_qty_col]
+      state_map[st_name]["tax"] -= row[s_tax_col]
 
-    temp_r = df_r[[r_st, r_qty, r_tax]].dropna(subset=[r_st]).copy()
-    temp_r[r_st] = temp_r[r_st].astype(str).str.strip().str.upper()
-    temp_r = temp_r[temp_r[r_st] != "NAN"]
-    temp_r[r_qty] = pd.to_numeric(temp_r[r_qty], errors="coerce").fillna(0)
-    temp_r[r_tax] = pd.to_numeric(temp_r[r_tax], errors="coerce").fillna(0)
-
-    grp_r = temp_r.groupby(r_st).agg({r_qty: "sum", r_tax: "sum"})
-    for state, row in grp_r.iterrows():
-      if state not in state_map:
-        state_map[state] = {"pcs": 0.0, "tax": 0.0}
-      state_map[state]["pcs"] -= row[r_qty]
-      state_map[state]["tax"] -= row[r_tax]
-
-  rows = []
-  for state in sorted(state_map.keys()):
-    pcs = int(round(state_map[state]["pcs"]))
-    tax = round(state_map[state]["tax"], 2)
+  # Build Statewise Summary Rows
+  summary_rows = []
+  for st_name in sorted(state_map.keys()):
+    pcs = int(round(state_map[st_name]["pcs"]))
+    tax = round(state_map[st_name]["tax"], 2)
     rate = round(tax / pcs, 2) if pcs > 0 else 0.0
-    rows.append({"STATE": state, "PCS": pcs, "RATE": rate, "TAXABLE VALUE": tax})
+    rows = {"STATE": st_name, "PCS": pcs, "RATE": rate, "TAXABLE VALUE": tax}
+    summary_rows.append(rows)
 
-  res_df = pd.DataFrame(rows)
-  return res_df
+  # Generate Formatted Excel Workbook without errors
+  wb = openpyxl.Workbook()
+  ws = wb.active
+  ws.title = "GSTR1 Statewise Summary"
+  ws.views.sheetView[0].showGridLines = True
+
+  # Styling & Formats
+  fill_navy = PatternFill(
+      start_color="1F4E78", end_color="1F4E78", fill_type="solid"
+  )
+  fill_zebra = PatternFill(
+      start_color="F9FAFB", end_color="F9FAFB", fill_type="solid"
+  )
+  fill_total = PatternFill(
+      start_color="E9EDF4", end_color="E9EDF4", fill_type="solid"
+  )
+
+  font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+  font_data = Font(name="Segoe UI", size=10)
+  font_total = Font(name="Segoe UI", size=10, bold=True)
+
+  border_side = Side(style="thin", color="E0E0E0")
+  border_data = Border(
+      left=border_side, right=border_side, top=border_side, bottom=border_side
+  )
+  border_total = Border(
+      top=Side(style="thin", color="000000"),
+      bottom=Side(style="double", color="000000"),
+  )
+
+  # Indian Number Formatting rule (₹15,74,455.94)
+  indian_fmt = (
+      "[>=10000000]₹##\\,##\\,##\\,##0.00;[>=100000]₹##\\,##\\,##0.00;₹##,##0.00"
+  )
+
+  # Headers
+  headers = ["STATE", "PCS", "RATE", "TAXABLE VALUE"]
+  for col_idx, h_text in enumerate(headers, start=1):
+    cell = ws.cell(row=1, column=col_idx, value=h_text)
+    cell.font = font_header
+    cell.fill = fill_navy
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+  ws.row_dimensions[1].height = 24
+
+  # Data Rows
+  for idx, r_data in enumerate(summary_rows, start=2):
+    is_even = idx % 2 == 0
+
+    ws.cell(row=idx, column=1, value=r_data["STATE"]).alignment = Alignment(
+        horizontal="left", vertical="center"
+    )
+
+    c_pcs = ws.cell(row=idx, column=2, value=r_data["PCS"])
+    c_pcs.number_format = "#,##0"
+    c_pcs.alignment = Alignment(horizontal="right", vertical="center")
+
+    c_rate = ws.cell(row=idx, column=3, value=r_data["RATE"])
+    c_rate.number_format = indian_fmt
+    c_rate.alignment = Alignment(horizontal="right", vertical="center")
+
+    c_tax = ws.cell(row=idx, column=4, value=r_data["TAXABLE VALUE"])
+    c_tax.number_format = indian_fmt
+    c_tax.alignment = Alignment(horizontal="right", vertical="center")
+
+    ws.row_dimensions[idx].height = 20
+    for col_c in range(1, 5):
+      cell_obj = ws.cell(row=idx, column=col_c)
+      cell_obj.font = font_data
+      cell_obj.border = border_data
+      if is_even:
+        cell_obj.fill = fill_zebra
+
+  # Total Row
+  tot_row = len(summary_rows) + 2
+  ws.row_dimensions[tot_row].height = 22
+  ws.cell(row=tot_row, column=1, value="Total").alignment = Alignment(
+      horizontal="left", vertical="center"
+  )
+
+  c_tot_pcs = ws.cell(
+      row=tot_row, column=2, value=f"=SUM(B2:B{tot_row-1})"
+  )
+  c_tot_pcs.number_format = "#,##0"
+  c_tot_pcs.alignment = Alignment(horizontal="right", vertical="center")
+
+  c_tot_tax = ws.cell(
+      row=tot_row, column=4, value=f"=SUM(D2:D{tot_row-1})"
+  )
+  c_tot_tax.number_format = indian_fmt
+  c_tot_tax.alignment = Alignment(horizontal="right", vertical="center")
+
+  for col_c in range(1, 5):
+    cell_obj = ws.cell(row=tot_row, column=col_c)
+    cell_obj.font = font_total
+    cell_obj.fill = fill_total
+    cell_obj.border = border_total
+
+  ws.column_dimensions["A"].width = 38
+  ws.column_dimensions["B"].width = 16
+  ws.column_dimensions["C"].width = 18
+  ws.column_dimensions["D"].width = 22
+
+  wb.save(output_filepath)
+  print(f"File successfully created: {output_filepath}")
 
 
-# Action Button
-if st.button("⚡ Generate Accounting Summary", type="primary"):
-  if sales_file is None and returns_file is None:
-    st.warning("Please upload at least one report file.")
-  else:
-    with st.spinner("Processing report entries..."):
-      df_sales = load_data(sales_file)
-      df_returns = load_data(returns_file)
-      summary_df = generate_summary(df_sales, df_returns, platform)
+# Run the function with your file paths:
+process_meesho_gst_files(
+    "tcs_sales.xlsx", "tcs_sales_return.xlsx", "Meesho_Clean_GSTR1_Report.xlsx"
+)
 
-      if summary_df is not None and not summary_df.empty:
-        st.success("Summary Generated Successfully!")
-
-        # Metrics Summary Row
-        tot_pcs = summary_df["PCS"].sum()
-        tot_tax = summary_df["TAXABLE VALUE"].sum()
-
-        m1, m2 = st.columns(2)
-        m1.metric("Total Pieces Sold (Net)", f"{tot_pcs:,} PCS")
-        m2.metric("Total Taxable Value", f"₹{tot_tax:,.2f}")
-
-        # Interactive Output Table
-        st.dataframe(
-            summary_df.style.format(
-                {"PCS": "{:,}", "RATE": "₹{:,.2f}", "TAXABLE VALUE": "₹{:,.2f}"}
-            ),
-            use_container_width=True,
-        )
-
-        # Excel Export Button
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-          summary_df.to_excel(
-              writer, index=False, sheet_name="GST Statewise Summary"
-          )
-        excel_bytes = output.getvalue()
-
-        st.download_button(
-            label="📥 Download Clean Excel Format",
-            data=excel_bytes,
-            file_name=f"{platform}_GST_Statewise_Summary.xlsx",
-            mime=(
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            ),
-        )
+ 
